@@ -6,10 +6,8 @@ This package provides a client for the rosbridge_server out of the rosbridge_sui
 
 To install the package, first install the dependencies.
 ```
-rosrun bobdep install rosbridge_client
-pip install rospy_message_converter
+pip install rospy_message_converter roslibpy
 ```
-Note, that there is one package that is not in the ROS distro, so it has to be installed manually.
 Then, install the package itself.
 ```
 catkin build rosbridge_client
@@ -50,7 +48,7 @@ apt install ros-noetic-rosbridge-suite
 
 Run the server:
 ```
-roslaunch rosbridge_server rosbridge_websocket.launch port:=9999
+roslaunch rosbridge_server rosbridge_websocket.launch port:=9090
 ```
 Note, that the port parameter can be omitted.
 In this case, the default port `9090` will be used.
