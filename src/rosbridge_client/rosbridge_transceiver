@@ -1,0 +1,147 @@
+#!/usr/bin/python3
+
+import rospy
+import roslibpy
+from rospy_message_converter import message_converter
+
+import sys
+import threading
+from importlib import import_module
+
+
+class SenderNode(object):
+    def __init__(self):
+        self.lock = threading.Lock()
+
+        self.host = rospy.get_param('~hostname', 'localhost')
+        self.port = rospy.get_param('~port', 9090)
+        self.send_list = rospy.get_param('~send', '').split(',')
+        self.recv_list = rospy.get_param('~recv', '').split(',')
+
+        # list of required forwards: local_topic -> remote_topic as [[str, str], ...]
+        self.send_list = [t.split(':') if ':' in t else (t, t) for t in self.send_list]
+        # list of required forwards: remote_topic -> local_topic as [[str, str], ...]
+        self.recv_list = [t.split(':') if ':' in t else (t, t) for t in self.recv_list]
+
+        self.send_type = {}  # dict local_topic -> type
+        self.send_con = {}   # dict local_topic -> [local_subscription, remote_publisher]
+
+        self.recv_type = {}  # dict remote_topic -> type
+        self.recv_con = {}   # dict remote_topic -> [remote_subscription, local_publisher]
+
+        self.client = None
+
+        self.connect()
+
+    def __del__(self):
+        if self._deserialized_sub is not None:
+            self._deserialized_sub.unsubscribe()
+
+        if self.talker is not None:
+            self.talker.unadvertise()
+
+        if self.client is not None:
+            self.client.terminate()
+
+    def connect(self):
+        # Initialize websocket
+        rospy.loginfo(f'Connecting to {self.host}:{self.port}')
+        self.client = roslibpy.Ros(host=self.host, port=self.port)
+        self.client.run()
+
+        for s in self.send_list:
+            self.init_send(s[0], s[1])
+
+        for r in self.recv_list:
+            self.init_recv(r[0], r[1])
+
+    def init_send(self, local_topic, remote_topic):
+        # determine message type dynamically
+        if local_topic not in self.send_type:
+            rospy.logdebug(f'Temporary local subscription to topic {local_topic} to retrieve type.')
+            self.send_con[local_topic] =\
+                rospy.Subscriber(local_topic, rospy.AnyMsg,
+                                 lambda raw_msg: self.local_binary_callback(local_topic, remote_topic, raw_msg)), None
+
+        # subscribe locally with a known type to forward the messages to the remote site
+        else:
+            topic_type = self.send_type[local_topic]
+            rospy.loginfo(f'Advertising: forward local topic {local_topic} to remote topic {remote_topic} '
+                          f'with type {topic_type}')
+            self.send_con[local_topic] = self.subscribe_deserialized(local_topic, remote_topic, topic_type)
+
+    @staticmethod
+    def get_msg_class(msg_type_full):
+        assert sys.version_info >= (2, 7)  # import_module's syntax needs 2.7
+        connection_header = msg_type_full.split('/')
+        ros_pkg = connection_header[0] + '.msg'
+        msg_type = connection_header[1]
+        msg_class = getattr(import_module(ros_pkg), msg_type)
+        return msg_class
+
+    def subscribe_deserialized(self, local_topic, remote_topic, msg_type_full):
+        msg_class = self.get_msg_class(msg_type_full)
+
+        # "create" remote topic
+        remote_topic = roslibpy.Topic(self.client, remote_topic, msg_type_full)
+
+        # subscribe to local topic
+        local_subscriber = rospy.Subscriber(local_topic, msg_class,
+                                            lambda msg: self.local_deserialized_callback(local_topic, msg))
+
+        return local_subscriber, remote_topic
+
+    def local_binary_callback(self, local_topic, remote_topic, data):
+        with self.lock:
+            # we can now deduce the message type, so unsubscribe the binary topic
+            self.send_con[local_topic][0].unregister()
+
+            # get the message type and advertise again (this time deserialized with the known type)
+            self.send_type[local_topic] = data._connection_header['type']
+            self.init_send(local_topic, remote_topic)
+
+    def local_deserialized_callback(self, local_topic, msg):
+        # convert message to dictionary, so roslibpy can send it in JSON format
+        msg_dict = message_converter.convert_ros_message_to_dictionary(msg)
+
+        # publish via remote_publisher
+        self.send_con[local_topic][1].publish(msg_dict)
+
+    def init_recv(self, remote_topic, local_topic):
+        if remote_topic not in self.recv_type:
+            rospy.logdebug(f'Asynchronous remote service call to retrieve type for remote topic {remote_topic}.')
+            self.client.get_topic_type(remote_topic, lambda r: self.remote_type_callback(remote_topic, local_topic, r))
+
+        else:
+            topic_type = self.recv_type[remote_topic]
+            rospy.loginfo(f'Subscribing: forward remote topic {remote_topic} to local topic {local_topic} '
+                          f'with type {topic_type}')
+            self.recv_con[remote_topic] = self.subscribe_remote(remote_topic, local_topic, topic_type)
+
+    def subscribe_remote(self, remote_topic, local_topic, msg_type_full):
+        msg_class = self.get_msg_class(msg_type_full)
+
+        # advertise local topic
+        local_publisher = rospy.Publisher(local_topic, msg_class, queue_size=10)
+
+        # "create" remote topic and subscribe to remote topic
+        rtopic = roslibpy.Topic(self.client, remote_topic, msg_type_full)
+        remote_subscriber = rtopic.subscribe(lambda msg_dict: self.remote_callback(remote_topic, msg_dict))
+
+        return remote_subscriber, local_publisher
+
+    def remote_type_callback(self, remote_topic, local_topic, get_type_response):
+        self.recv_type[remote_topic] = get_type_response['type']
+        self.init_recv(remote_topic, local_topic)
+
+    def remote_callback(self, remote_topic, msg_dict):
+        # convert message to dictionary, so roslibpy can send it in JSON format
+        msg = message_converter.convert_dictionary_to_ros_message(self.recv_type[remote_topic], msg_dict)
+
+        # publish via local_publisher
+        self.recv_con[remote_topic][1].publish(msg)
+
+
+rospy.init_node('rosbridge_sender')
+sender = SenderNode()
+rospy.spin()

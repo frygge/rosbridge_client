@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<package format="2">
+	<name>rosbridge_client</name>
+	<version>0.0.0</version>
+	<description>A toolbox to connect local ROS topics to a remote rosbridge_suite.</description>
+
+	<maintainer email="joerg.schaefer@dlr.de">aoerg P. Schaefer</maintainer>
+
+	<license>Closed</license>
+
+	<buildtool_depend>catkin</buildtool_depend>
+	<depend>rospy</depend>
+	<!--depend>rospy_message_converter</depend-->
+	<depend>roslibpy</depend>
+
+	<export>
+	</export>
+</package>
